@@ -1,0 +1,18 @@
+{
+  "name": "salesforce-app",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Salesforce App",
+  "scripts": {
+    "postinstall": "echo y | sf plugins install sfdx-git-delta@5.21.0",
+    "deploy:delta": "./scripts/npm/deployDelta.sh",
+    "run:pmd": "./scripts/npm/runPMD.sh",
+    "run:prettier": "./scripts/npm/runPrettier.sh",
+    "gh:create:release": "./scripts/npm/createGitHubRelease.sh"
+  },
+  "dependencies": {
+    "@salesforce/cli": "1.81.6",
+    "prettier": "2.8.8",
+    "prettier-plugin-apex": "1.8.0"
+  }
+}

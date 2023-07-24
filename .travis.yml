@@ -1,0 +1,476 @@
+language: node_js
+
+dist: jammy
+
+node_js:
+  - 20
+
+cache: 
+  npm: false
+
+git:
+  depth: false
+
+before_install:
+  - source ./scripts/lib/assertValidPullRequest.sh
+  - prValidationError=$(assertValidPullRequest)
+  - |
+    if [[ "${prValidationError}" != "" ]]; then
+      echo "--- INVALID PR ---"
+      echo "${prValidationError}";
+      travis_terminate 1;
+    fi
+
+
+jobs:
+  include:
+
+#### Stream of Work Pipeline Configuration and Main Pipeline ####
+# Validating changes from DEV org to MERGE orgs in Stream of Work sub-pipelines or in the main pipeline (jobs run in parallel)
+#   * Validate against Main / Stream of Work MERGE Org
+#   * Run PMD on delta
+#   * Run prettier if there are changes on classes, triggers, etc...
+    - stage: Validate changes against MERGE org before promoting them
+      name: Validate changes against MERGE Org
+      if: type = pull_request AND branch =~ ^(\w+-)?release.*$
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - |
+          if [[ "${TRAVIS_BRANCH}" == release ]]; then
+            PROJECT_PREFIX=MERGE;
+            BASELINE_VAR_NAME=PROD_VERSION;
+          else
+            PROJECT_PREFIX=$(parseProject $TRAVIS_BRANCH "^(.+)-release.*$");
+            BASELINE_VAR_NAME="${PROJECT_PREFIX//-/_}_BASELINE";
+          fi
+        - echo "PREFIX >> $PROJECT_PREFIX >> ${PROJECT_PREFIX//-/_}";
+        - DEST_AUTH_URL_VAR_NAME="${PROJECT_PREFIX//-/_}_AUTH_URL"
+        - DEST_AUTH_URL_VAR_NAME_CI=$(getCIAuthUrlVarName $DEST_AUTH_URL_VAR_NAME)
+        - DEST_USES_DOC_VAR_NAME="${PROJECT_PREFIX//-/_}_USES_DOC"
+        - |
+          if [[ "${DEST_AUTH_URL_VAR_NAME_CI}" != "" ]]; then
+            DEST_AUTH_URL_VAR_NAME=${DEST_AUTH_URL_VAR_NAME_CI}
+          fi
+        - |
+          if [[ "${!DEST_AUTH_URL_VAR_NAME}" == "" ]]; then
+            echo "The ${DEST_AUTH_URL_VAR_NAME} SFDX Auth URL variable is not configured in Travis";
+            travis_terminate 1;
+          fi
+        - |
+          if [[ "${!BASELINE_VAR_NAME}" == "" ]]; then
+            echo "There was no ${!BASELINE_VAR_NAME} configured in Travis, using $PROD_VERSION instead";
+            BASELINE_VAR_NAME=PROD_VERSION;
+          fi
+        - |
+          if [ "${!DEST_USES_DOC_VAR_NAME^^}" != "TRUE" ] && [ -s ./config/environments/${PROJECT_PREFIX//-/_}.env ]; then
+            source ./config/environments/${PROJECT_PREFIX//-/_}.env;
+          else
+            echo "Uses DevOps Center: '${!DEST_USES_DOC_VAR_NAME^^}' or there's no string replacement configuration";
+          fi
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Validating $TRAVIS_BRANCH against $DEST_AUTH_URL_VAR_NAME using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} onlyCheck;
+          else
+            echo "Validating $TRAVIS_BRANCH against $DEST_AUTH_URL_VAR_NAME without 'travis_wait'";
+            npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} onlyCheck || travis_terminate 1;
+          fi
+      fail_fast: true
+
+    - stage: Validate changes against MERGE org before promoting them
+      name: Run PMD on the changes
+      if: env(DISABLE_PMD) != "true" AND type = pull_request AND branch =~ ^(\w+-)?release.*$
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Running PMD on delta between $TRAVIS_COMMIT_RANGE using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run run:pmd -- $TRAVIS_COMMIT_RANGE;
+          else
+            echo "Running PMD on delta between $TRAVIS_COMMIT_RANGE without 'travis_wait'";
+            npm run run:pmd -- $TRAVIS_COMMIT_RANGE || travis_terminate 1;
+          fi
+      fail_fast: true
+
+    - stage: Validate changes against MERGE org before promoting them
+      name: Run prettier on the changes
+      if:  env(DISABLE_PRETTIER) != "true" AND type = pull_request AND branch =~ ^(\w+-)?release.*$
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Running Prettier on delta between $TRAVIS_COMMIT_RANGE using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run run:prettier -- $TRAVIS_COMMIT_RANGE;
+          else
+            echo "Running PMD on delta between $TRAVIS_COMMIT_RANGE without 'travis_wait'";
+            npm run run:prettier -- $TRAVIS_COMMIT_RANGE || travis_terminate 1;
+          fi
+      fail_fast: true
+
+
+# Deploy changes from DEV org to MERGE orgs on Stream of Work sub-pipelines (jobs run in parallel)
+#   * Validate against Stream of Work MERGE Org
+#   * Run PMD on delta
+#   * Run prettier if there are changes on classes, triggers, etc...
+    - stage: Promote changes by merging a pull request
+      name: Deploy changes to MERGE Org
+      if: type = push AND branch =~ ^(\w+-)?release.*$ AND tag IS blank
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - |
+          if [[ "${TRAVIS_BRANCH}" == release ]]; then
+            PROJECT_PREFIX=MERGE;
+            BASELINE_VAR_NAME=PROD_VERSION;
+          else
+            PROJECT_PREFIX=$(parseProject $TRAVIS_BRANCH "^(.+)-release.*$");
+            BASELINE_VAR_NAME="${PROJECT_PREFIX//-/_}_BASELINE";
+          fi
+        - echo "PREFIX >> $PROJECT_PREFIX >> ${PROJECT_PREFIX//-/_}";
+        - DEST_AUTH_URL_VAR_NAME="${PROJECT_PREFIX//-/_}_AUTH_URL"
+        - DEST_USES_DOC_VAR_NAME="${PROJECT_PREFIX//-/_}_USES_DOC"
+        - |
+          if [[ "${!DEST_AUTH_URL_VAR_NAME}" == "" ]]; then
+            echo "SFDX Auth URL ${DEST_AUTH_URL_VAR_NAME} is not configured in Travis";
+            travis_terminate 1;
+          fi
+        - |
+          if [[ "${!BASELINE_VAR_NAME}" == "" ]]; then
+            echo "There was no ${!BASELINE_VAR_NAME} configured in Travis, using $PROD_VERSION instead";
+            BASELINE_VAR_NAME=PROD_VERSION;
+          fi
+        - |
+          if [ "${!DEST_USES_DOC_VAR_NAME^^}" != "TRUE" ] && [ -s ./config/environments/${PROJECT_PREFIX//-/_}.env ]; then
+            source ./config/environments/${PROJECT_PREFIX//-/_}.env;
+          else
+            echo "Uses DevOps Center: '${!DEST_USES_DOC_VAR_NAME^^}' or there's no string replacement configuration";
+          fi
+        - DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME="${PROJECT_PREFIX//-/_}_DEPLOY_DEFAULT_TEST_LEVEL"
+        - echo "Promoting using default test level - ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME}"
+        - |
+          if [ "${!DEST_USES_DOC_VAR_NAME^^}" != "TRUE" ]; then
+            if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+              echo "Promoting $TRAVIS_BRANCH against $DEST_AUTH_URL_VAR_NAME using 'travis_wait ${TRAVIS_WAIT:-30}'";
+              travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} false ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME};
+            else
+              echo "Promoting $TRAVIS_BRANCH against $DEST_AUTH_URL_VAR_NAME without 'travis_wait'";
+              npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} false ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME} || travis_terminate 1;
+            fi
+          else
+            echo "Not promoting on Salesforce DevOps Center managed stream of work: '${!DEST_USES_DOC_VAR_NAME^^}'";
+          fi
+      fail_fast: true
+
+
+# Solution ready to be deployed to a higher environment or PROD (jobs run in parallel)
+#   * Create GitHub release
+#   * Deploy the solution to thePROD Org
+    - stage: Promote changes with a tag
+      name: Build GitHub release for new tag
+      if: tag =~ ^(.+-)?v[0-9]+\.[0-9]+\.[0-9]+.*$
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - echo "Creating GitHub Release with delta from ${TRAVIS_TAG}"
+        - |
+          if [[ "${TRAVIS_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+            echo "${TRAVIS_TAG} is a PROD version";
+            BASELINE_VAR_NAME=PROD_VERSION;
+          else
+            echo "${TRAVIS_TAG} is NOT a PROD version";
+            PROJECT_PREFIX=$(parseProject $TRAVIS_TAG);
+            BASELINE_VAR_NAME="${PROJECT_PREFIX//-/_}_BASELINE";
+            echo "PREFIX >> $PROJECT_PREFIX >> ${PROJECT_PREFIX//-/_}";
+          fi
+        - |
+          if [[ "${!BASELINE_VAR_NAME}" == "" ]]; then
+            echo "There was no ${!BASELINE_VAR_NAME} configured in Travis, using $PROD_VERSION instead";
+            BASELINE_VAR_NAME=PROD_VERSION;
+          fi
+        - echo "Creating GitHub Release >> ${!BASELINE_VAR_NAME} $TRAVIS_TAG"
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Promoting delta between ${!BASELINE_VAR_NAME} and ${TRAVIS_TAG} to ${DEST_AUTH_URL_VAR_NAME} using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run gh:create:release -- ${!BASELINE_VAR_NAME} $TRAVIS_TAG;
+          else
+            echo "Promoting delta between ${!BASELINE_VAR_NAME} and ${TRAVIS_TAG} to ${DEST_AUTH_URL_VAR_NAME} without 'travis_wait'";
+            npm run gh:create:release -- ${!BASELINE_VAR_NAME} $TRAVIS_TAG || travis_terminate 1;
+          fi
+      fail_fast: true
+
+    - stage: Promote changes with a tag
+      name: Deploy the solution
+      if: tag =~ ^(.+-)?v[0-9]+\.[0-9]+\.[0-9]+.*$
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - echo "Deploying delta from ${TRAVIS_TAG}"
+        - VALIDATE=false
+        - |
+          if [[ "${TRAVIS_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+            echo "${TRAVIS_TAG} is a PROD version";
+            BASELINE_VAR_NAME=PROD_VERSION;
+            PROJECT_PREFIX=PROD;
+            if [[ "${PROD_VERSION_VALIDATES^^}" == "TRUE" ]]; then
+              echo "Travis is configured to VALIDATE against production for Production Version Tags -- Quick deploy manually";
+              VALIDATE=true;
+            fi
+          else
+            echo "${TRAVIS_TAG} is NOT a PROD version";
+            PROJECT_PREFIX=$(parseProject $TRAVIS_TAG);
+            BASELINE_VAR_NAME="${PROJECT_PREFIX//-/_}_BASELINE";
+            echo "PREFIX >> $PROJECT_PREFIX >> ${PROJECT_PREFIX//-/_}";
+          fi
+        - DEST_AUTH_URL_VAR_NAME="${PROJECT_PREFIX//-/_}_AUTH_URL";
+        - |
+          if [[ "${!DEST_AUTH_URL_VAR_NAME}" == "" ]]; then
+            echo "SFDX Auth URL ${DEST_AUTH_URL_VAR_NAME} is not configured in Travis";
+            travis_terminate 1;
+          fi
+        - echo "Deploy delta from ${TRAVIS_BRANCH} to ${DEST_AUTH_URL_VAR_NAME}"
+        - |
+          if [[ "${!BASELINE_VAR_NAME}" == "" ]]; then
+            echo "There was no ${!BASELINE_VAR_NAME} configured in Travis, using $PROD_VERSION instead";
+            BASELINE_VAR_NAME=PROD_VERSION;
+          fi
+        - |
+          if [ -s ./config/environments/${PROJECT_PREFIX//-/_}.env ]; then
+            source ./config/environments/${PROJECT_PREFIX//-/_}.env;
+          fi
+        - DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME="${PROJECT_PREFIX//-/_}_DEPLOY_DEFAULT_TEST_LEVEL"
+        - echo "Promoting using default test level - ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME}"
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Promoting delta between ${!BASELINE_VAR_NAME} and ${TRAVIS_TAG} to ${DEST_AUTH_URL_VAR_NAME} using 'travis_wait ${TRAVIS_WAIT:-30}' and VALIDATE = ${VALIDATE}";
+            travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} ${VALIDATE} ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME};
+          else
+            echo "Promoting delta between ${!BASELINE_VAR_NAME} and ${TRAVIS_TAG} to ${DEST_AUTH_URL_VAR_NAME} without 'travis_wait' and VALIDATE = ${VALIDATE}";
+            npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} ${VALIDATE} ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME} || travis_terminate 1;
+          fi
+      fail_fast: true
+
+
+# Validating changes from release
+#   * Validate against PROD Org
+    - stage: Create PR against main
+      name: Validate against PROD
+      if: type = pull_request AND branch IN (main, master)
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - |
+          if [ -s ./config/environments/PROD.env ]; then
+            source ./config/environments/PROD.env;
+          fi
+        - travis_wait 30 deployDeltaPackage $PROD_AUTH_URL $PROD_VERSION onlyCheck
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Promoting delta between $PROD_VERSION and 'main' to PROD_AUTH_URL using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- $PROD_AUTH_URL $PROD_VERSION onlyCheck;
+          else
+            echo "Promoting delta between $PROD_VERSION and 'main' to PROD_AUTH_URL without 'travis_wait'";
+            npm run deploy:delta -- $PROD_AUTH_URL $PROD_VERSION onlyCheck || travis_terminate 1;
+          fi
+      fail_fast: true
+
+
+# Client Services pipeline
+#   * Validate against Client Services Test Org
+    - stage: Create PR against cs-enhancements
+      name: Validate against Client Services Test
+      if: type = pull_request AND branch = cs-enhancements
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - |
+          if [[ "${CLIENT_SERVICES_TEST_AUTH_URL_CI}" != "" ]]; then
+            CLIENT_SERVICES_TEST_AUTH_URL=${CLIENT_SERVICES_TEST_AUTH_URL_CI}
+          fi
+        - |
+          if [[ "${CLIENT_SERVICES_TEST_AUTH_URL}" == "" ]]; then
+            echo "Neither CLIENT_SERVICES_TEST_AUTH_URL_CI nor CLIENT_SERVICES_TEST_AUTH_URL SFDX Auth URL variables are not configured in Travis";
+            travis_terminate 1;
+          fi
+        - |
+          if [[ "${CLIENT_SERVICES_TEST_BASELINE}" == "" ]]; then
+            echo "There was no CLIENT_SERVICES_TEST_BASELINE configured in Travis, using $PROD_VERSION instead";
+            CLIENT_SERVICES_TEST_BASELINE=${PROD_VERSION};
+          fi
+        - |
+          if [ -s ./config/environments/CLIENT_SERVICES_TEST.env ]; then
+            source ./config/environments/CLIENT_SERVICES_TEST.env;
+          fi
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Validating delta between $PROD_VERSION and $CLIENT_SERVICES_TEST_BASELINE on CLIENT_SERVICES_TEST_AUTH_URL using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- $CLIENT_SERVICES_TEST_AUTH_URL $CLIENT_SERVICES_TEST_BASELINE onlyCheck;
+          else
+            echo "Validating delta between $PROD_VERSION and $CLIENT_SERVICES_TEST_BASELINE on CLIENT_SERVICES_TEST_AUTH_URL without 'travis_wait'";
+            npm run deploy:delta -- $CLIENT_SERVICES_TEST_AUTH_URL $CLIENT_SERVICES_TEST_BASELINE onlyCheck || travis_terminate 1;
+          fi
+      fail_fast: true
+
+#   * Validate against Client Services Test Org
+    - stage: Create PR against cs-enhancements
+      name: Validate against Client Services Test
+      if: type = push AND branch = cs-enhancements AND tag IS blank
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - |
+          if [[ "${CLIENT_SERVICES_TEST_BASELINE}" == "" ]]; then
+            echo "There was no CLIENT_SERVICES_TEST_BASELINE configured in Travis, using $PROD_VERSION instead";
+            CLIENT_SERVICES_TEST_BASELINE=${PROD_VERSION};
+          fi
+        - |
+          if [ -s ./config/environments/CLIENT_SERVICES_TEST.env ]; then
+            source ./config/environments/CLIENT_SERVICES_TEST.env;
+          fi
+        - echo "travis_wait 30 deployDeltaPackage $CLIENT_SERVICES_TEST_AUTH_URL $CLIENT_SERVICES_TEST_BASELINE"
+        - travis_wait 30 deployDeltaPackage $CLIENT_SERVICES_TEST_AUTH_URL $CLIENT_SERVICES_TEST_BASELINE
+        - echo "Promoting using default test level - ${CLIENT_SERVICES_TEST_DEPLOY_DEFAULT_TEST_LEVEL}"
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Promoting delta between $PROD_VERSION and $CLIENT_SERVICES_TEST_BASELINE to CLIENT_SERVICES_TEST_AUTH_URL using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- $CLIENT_SERVICES_TEST_AUTH_URL $CLIENT_SERVICES_TEST_BASELINE false $CLIENT_SERVICES_TEST_DEPLOY_DEFAULT_TEST_LEVEL;
+          else
+            echo "Promoting delta between $PROD_VERSION and $CLIENT_SERVICES_TEST_BASELINE to CLIENT_SERVICES_TEST_AUTH_URL without 'travis_wait'";
+            npm run deploy:delta -- $CLIENT_SERVICES_TEST_AUTH_URL $CLIENT_SERVICES_TEST_BASELINE false $CLIENT_SERVICES_TEST_DEPLOY_DEFAULT_TEST_LEVEL || travis_terminate 1;
+          fi
+      fail_fast: true
+
+
+# Back-promotions
+#   * Back-promote the changes with a tag
+    - stage: Back-promote with a tag
+      name: Back-promoting Changes
+      if: tag =~ ^backpromote-[^-]+.*$
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - echo "Back-promoting delta from ${TRAVIS_TAG}"
+        - echo "${TRAVIS_TAG} is NOT a PROD version"
+        - PROJECT_PREFIX=$(parseProject $TRAVIS_TAG 'backpromote-([^-]+).*')
+        - DEST_AUTH_URL_VAR_NAME="${PROJECT_PREFIX//-/_}_AUTH_URL"
+        - BASELINE_VAR_NAME="${PROJECT_PREFIX//-/_}_BASELINE"
+        - echo "PREFIX >> $PROJECT_PREFIX >> ${PROJECT_PREFIX//-/_}";
+        - |
+          if [[ "${!DEST_AUTH_URL_VAR_NAME}" == "" ]]; then
+            echo "SFDX Auth URL ${DEST_AUTH_URL_VAR_NAME} is not configured in Travis";
+            travis_terminate 1;
+          fi
+        - echo "Deploy delta from ${TRAVIS_BRANCH} to ${DEST_AUTH_URL_VAR_NAME}"
+        - |
+          if [[ "${!BASELINE_VAR_NAME}" == "" ]]; then
+            echo "There was no ${!BASELINE_VAR_NAME} configured in Travis, using $PROD_VERSION instead";
+            BASELINE_VAR_NAME=PROD_VERSION;
+          fi
+        - |
+          if [ -s ./config/environments/${PROJECT_PREFIX//-/_}.env ]; then
+            source ./config/environments/${PROJECT_PREFIX//-/_}.env;
+          fi
+        - DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME="${PROJECT_PREFIX//-/_}_DEPLOY_DEFAULT_TEST_LEVEL"
+        - echo "Promoting using default test level - ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME}"
+        - echo "Back-promoting delta between ${!BASELINE_VAR_NAME} and ${TRAVIS_TAG} to ${!DEST_AUTH_URL_VAR_NAME}"
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Promoting $TRAVIS_TAG to $DEST_AUTH_URL_VAR_NAME using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} false ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME};
+          else
+            echo "Promoting $TRAVIS_TAG to $DEST_AUTH_URL_VAR_NAME without 'travis_wait'";
+            npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} false ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME} || travis_terminate 1;
+          fi
+      fail_fast: true
+
+
+#### Branch backed environment pipelines ####
+# Validating changes on the environment backed by the branch
+#   * Validate against the backed environment
+    - stage: Validate changes against backed environment before promoting them
+      name: Validate changes against backed environment
+      if: type = pull_request AND branch =~ ^\w+-environment.*$
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - PROJECT_PREFIX=$(parseProject $TRAVIS_BRANCH "^(.+)-environment.*$")
+        - DEST_AUTH_URL_VAR_NAME="${PROJECT_PREFIX//-/_}_AUTH_URL"
+        - DEST_AUTH_URL_VAR_NAME_CI=$(getCIAuthUrlVarName $DEST_AUTH_URL_VAR_NAME)
+        - |
+          if [[ "${DEST_AUTH_URL_VAR_NAME_CI}" != "" ]]; then
+            DEST_AUTH_URL_VAR_NAME=${DEST_AUTH_URL_VAR_NAME_CI}
+          fi
+        - BASELINE_VAR_NAME="${PROJECT_PREFIX//-/_}_BASELINE"
+        - echo "PREFIX >> $PROJECT_PREFIX >> ${PROJECT_PREFIX//-/_}"
+        - |
+          if [[ "${!DEST_AUTH_URL_VAR_NAME}" == "" ]]; then
+            echo "SFDX Auth URL ${DEST_AUTH_URL_VAR_NAME} is not configured in Travis";
+            travis_terminate 1;
+          fi
+        - |
+          if [[ "${!BASELINE_VAR_NAME}" == "" ]]; then
+            echo "There was no ${!BASELINE_VAR_NAME} configured in Travis, using $PROD_VERSION instead";
+            BASELINE_VAR_NAME=PROD_VERSION;
+          fi
+        - |
+          if [ -s ./config/environments/${PROJECT_PREFIX//-/_}.env ]; then
+            source ./config/environments/${PROJECT_PREFIX//-/_}.env;
+          fi
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Validating $TRAVIS_BRANCH against $DEST_AUTH_URL_VAR_NAME using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} onlyCheck;
+          else
+            echo "Validating $TRAVIS_BRANCH against $DEST_AUTH_URL_VAR_NAME without 'travis_wait'";
+            npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} onlyCheck || travis_terminate 1;
+          fi
+      fail_fast: true
+
+
+# Deploy changes to the environment backed by the branch
+#   * Deploy to backed environment from the backing branch
+    - stage: Promote changes by merging a pull request
+      name: Deploy changes to backed environment
+      if: type = push AND branch =~ ^\w+-environment.*$ AND tag IS blank
+      script:
+        - source ./scripts/lib/building_blocks.sh
+        - PROJECT_PREFIX=$(parseProject $TRAVIS_BRANCH "^(.+)-environment.*$")
+        - DEST_AUTH_URL_VAR_NAME="${PROJECT_PREFIX//-/_}_AUTH_URL"
+        - BASELINE_VAR_NAME="${PROJECT_PREFIX//-/_}_BASELINE"
+        - echo "PREFIX >> $PROJECT_PREFIX >> ${PROJECT_PREFIX//-/_}"
+        - |
+          if [[ "${!DEST_AUTH_URL_VAR_NAME}" == "" ]]; then
+            echo "SFDX Auth URL ${DEST_AUTH_URL_VAR_NAME} is not configured in Travis";
+            travis_terminate 1;
+          fi
+        - |
+          if [[ "${!BASELINE_VAR_NAME}" == "" ]]; then
+            echo "There was no ${!BASELINE_VAR_NAME} configured in Travis, using $PROD_VERSION instead";
+            BASELINE_VAR_NAME=PROD_VERSION;
+          fi
+        - |
+          if [ -s ./config/environments/${PROJECT_PREFIX//-/_}.env ]; then
+            source ./config/environments/${PROJECT_PREFIX//-/_}.env;
+          fi
+        - DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME="${PROJECT_PREFIX//-/_}_DEPLOY_DEFAULT_TEST_LEVEL"
+        - echo "Promoting using default test level - ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME}"
+        - |
+          if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
+            echo "Validating $TRAVIS_BRANCH against $DEST_AUTH_URL_VAR_NAME using 'travis_wait ${TRAVIS_WAIT:-30}'";
+            travis_wait ${TRAVIS_WAIT:-30} npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} false ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME};
+          else
+            echo "Validating $TRAVIS_BRANCH against $DEST_AUTH_URL_VAR_NAME without 'travis_wait'";
+            npm run deploy:delta -- ${!DEST_AUTH_URL_VAR_NAME} ${!BASELINE_VAR_NAME} false ${!DEPLOY_DEFAULT_TEST_LEVEL_VAR_NAME} || travis_terminate 1;
+          fi
+      fail_fast: true
+
+  fast_finish: true
+
+branches:
+  only:
+    # Main pipeline Branches
+    - main
+    - master
+    - release
+    # Stream of Work Branches
+    - /\w+-release.*/
+    - cs-enhancements
+    # Branches backing environments
+    - /\w+-environment.*/
+    # DevOps Center merge branch
+    - devops-merge
+    # Version Tags
+    - /(.+-)?v[0-9]+\.[0-9]+\.[0-9]+/
+    # Back-promotion Tags
+    - /backpromote-[^-]+.*/

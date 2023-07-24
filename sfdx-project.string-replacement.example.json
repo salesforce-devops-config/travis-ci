@@ -1,0 +1,21 @@
+{
+    "packageDirectories": [
+        {
+            "path": "force-app",
+            "default": true
+        }
+    ],
+    "replacements": [
+        {
+            "glob": "**/*.*",
+            "stringToReplace": "Some string we want to replace",
+            "replaceWithEnv": "SOME_ENV_VAR",
+            "replaceWhenEnv": [{
+                "env": "REPLACE_STRINGS",
+                "value": "true"
+            }]
+        }
+    ],
+    "namespace": "",
+    "sourceApiVersion": "57.0"
+}
