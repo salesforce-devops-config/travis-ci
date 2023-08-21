@@ -258,7 +258,6 @@ jobs:
           if [ -s ./config/environments/PROD.env ]; then
             source ./config/environments/PROD.env;
           fi
-        - travis_wait 30 deployDeltaPackage $PROD_AUTH_URL $PROD_VERSION onlyCheck
         - |
           if [ -z ${TRAVIS_WAIT//[0-9]} ] && [ ${TRAVIS_WAIT:-30} -gt 0 ]; then
             echo "Promoting delta between $PROD_VERSION and 'main' to PROD_AUTH_URL using 'travis_wait ${TRAVIS_WAIT:-30}'";
