@@ -97,7 +97,7 @@ function runDeltaPMD() {
     local apexRuleSet=${2:-"rulesets/apex_ruleset.xml"}
     
     createDeltaPackage ./delta $commitRange
-    ./pmd-bin-6.50.0/bin/run.sh pmd -d delta/**/classes -R $apexRuleSet -f textcolor --verbose
+    ./pmd-bin-6.50.0/bin/run.sh pmd -d ./delta -R $apexRuleSet -f textcolor
 }
 
 # runDeltaPrettier verifies the delta package with prettier
